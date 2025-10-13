@@ -1,0 +1,205 @@
+---
+title: "Introduction to MAF"
+author: Erika Li, Jeanne Revilla, Mahija Mogalipuvvu, adapted from Nicole Black, Wade Boohar
+date: 07/17/22
+updated: 9/29/2025
+---
+
+***Deliverables***
+- upload this R Notebook to your GitHub and submit the link to your Repo on Brightspace
+- include ALL graphs or figures created in this assignment in a folder with your R notebook with descriptive file names.
+
+We encourage you to work with a partner. Therefore, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In this assignment, you will need to use your skills learned in class to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data.csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("maftools", quietly = TRUE))
+  BiocManager::install("maftools")
+library(maftools)  # <-- needed for read.maf
+
+maf_object <- read.maf(maf = maf,
+                       clinicalData = clinic,
+                       isTCGA = TRUE)
+
+saveRDS(maf_object, file = "/home1/wangaman/490_cluster/analysis_data/maf_object.rds")
+
+```
+
+It's useful to save your MAF_object, so that you don't have to go through the trouble of querying and preparing it everytime. The saveRDS function allows us to save an R object, allowing us to access it directly from our files.
+
+```{r}
+getwd()
+knitr::opts_knit$set(root.dir = normalizePath("/home1/wangaman/490_cluster/analysis_data"))
+
+if (!requireNamespace("TCGAbiolinks", quietly = TRUE))
+    BiocManager::install("TCGAbiolinks")
+library(TCGAbiolinks)
+
+clin_query <- GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Clinical",
+  data.type = "Clinical Supplement",
+  data.format = "BCR Biotab"
+)
+
+GDCdownload(clin_query)
+
+clinical.BCRtab.all <- GDCprepare(clin_query)
+
+clinic <- clinical.BCRtab.all$clinical_patient_brca[-c(1, 2), ]
+
+
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+maf_query <- GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Simple Nucleotide Variation",
+  access = "open",
+  data.type = "Masked Somatic Mutation",
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+GDCdownload(maf_query, method = "api", files.per.chunk = 100)
+maf <- GDCprepare(maf_query)
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("maftools", quietly = TRUE))
+  BiocManager::install("maftools")
+library(maftools)  # <-- needed for read.maf
+
+maf_object <- read.maf(maf = maf,
+                       clinicalData = clinic,
+                       isTCGA = TRUE)
+
+saveRDS(maf_object, file = "/home1/wangaman/490_cluster/analysis_data/maf_object.rds")
+```
+When you reopen a new R session and want to access your MAF_object, you can use the readRDS function to load the object back into a new variable.
+```{r}
+MAF_object <- readRDS(file = "/home1/wangaman/490_cluster/analysis_data/maf_object.rds")
+# ex. MAF_object <- readRDS(file = "/home1/erika/490_cluster/analysis_data/maf_object.rds")
+```
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+clinic$HER2_group <- ifelse(clinic$her2_status_by_ihc == "Positive", "Positive", "Negative")
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+pos_mask <- ifelse(maf_object@clinical.data$her2_status_by_ihc == "Positive", TRUE, FALSE) 
+neg_mask <- ifelse(maf_object@clinical.data$her2_status_by_ihc == "Negative", TRUE, FALSE)
+barcodes_pos <- maf_object@clinical.data$Tumor_Sample_Barcode[pos_mask]
+barcodes_neg <- maf_object@clinical.data$Tumor_Sample_Barcode[neg_mask]
+
+maf_pos <- subsetMaf(maf = maf_object, tsb = barcodes_pos)
+maf_neg <- subsetMaf(maf = maf_object, tsb = barcodes_neg)
+
+library(maftools)
+
+# Get top 20 most frequently mutated genes overall
+top_genes <- head(getGeneSummary(maf_object)$Hugo_Symbol, 20)
+
+# Plot co-oncoplot comparing HER2+ vs HER2−
+coOncoplot(
+  m1 = maf_pos,
+  m2 = maf_neg,
+  m1Name = "HER2+",
+  m2Name = "HER2−",
+  genes = top_genes
+)
+```
+Q2 answer:
+One gene that has large discrepancy is CDH1 which CDH1 mutation rate is higher in HER2- then in HER 2+ (15% and 9%). According to the research, CDH1 encodes E-cadherin, a protein that suppresses cell adhesion and is frequently lost in HER2-negative tumors. In contrast, HER2 is associated with a distinct set of genomic alterations and is part of the molecular signature of HER2-positive tumors 
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+CDH1_mut <- subsetMaf(maf = maf_object, genes = "CDH1", mafObj = FALSE)
+CDH1_barcodes <- unique(CDH1_mut$Tumor_Sample_Barcode)
+clin_data <- maf_object@clinical.data
+clin_data$HER2_group <- ifelse(clin_data$her2_status_by_ihc == "Positive", "HER2+", "HER2-")
+clin_data$CDH1_status <- ifelse(clin_data$Tumor_Sample_Barcode %in% CDH1_barcodes, "Mutated", "Not Mutated")
+tbl <- table(clin_data$HER2_group, clin_data$CDH1_status)
+tbl
+
+fisher_result <- fisher.test(tbl)
+fisher_result
+```
+Q3 answer:
+The p value is 0.1946 which is not statistically significant since P>0.05. The odds ratio is 1.49 which shows that the HER2+ tumors are about 1.5 more likely to have a CDH1 mutation compared to HER2- tumors. But the confidence interval crosses 1 which emphasizes that the difference might be due to chance rather than biological association. In sum, it shows that CDH1 mutations are not strongly correlated with HER2 status.
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+lollipopPlot2(
+  m1       = maf_pos,
+  m2       = maf_neg,
+  gene     = "CDH1",
+  m1_name  = "HER2+",
+  m2_name  = "HER2−",
+  legendTxtSize = 1.0,
+  labPosSize   = 1.0
+)
+
+```
+Q4 answer:
+The CDH1 mutation occur 9.33% of HER2+ and 14.57% of HER2- tumors, which corresponds to the Fisher's test that HER2- tumors have slightly higher chance of CDH1 mutation. And CDH1 alterations are dispersed throughout the coding sequence with no single hotspot. Both has similar types of mutations which are frameshift insertions, nonsense mutation, and splice site. However, HER2- tumor have higher frequency and wider distribution of CDH1 mutation The variants spread through Cadherin and Cadherin_C domains.   
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+clin <- as.data.frame(maf_object@clinical.data)
+
+clin$last_contact_days_to <- ifelse(
+  clin$last_contact_days_to == "[Not Available]",
+  NA,
+  as.numeric(clin$last_contact_days_to)
+)
+
+clin$death_days_to <- ifelse(
+  clin$death_days_to == "[Not Applicable]",
+  NA,
+  as.numeric(clin$death_days_to)
+)
+
+clin$OS_time <- ifelse(
+  !is.na(clin$death_days_to),
+  clin$death_days_to,
+  clin$last_contact_days_to
+)
+
+clin$Overall_Survival_Status <- ifelse(
+  clin$vital_status == "Dead",
+  TRUE,
+  FALSE
+)
+
+library(maftools)
+
+mafSurvival(
+  maf          = maf_object,
+  genes        = "CDH1",
+  clinicalData = clin,
+  time         = "OS_time",
+  Status       = "Overall_Survival_Status",
+  isTCGA       = TRUE
+)
+```
+
+Q5 answer:
+The KM plot for CDH1 show no statistically significant difference in overall survival between mutated and wild-type samples (p=0.0743, HR=0.0503). Even though CDH1 mutated cases exhibited a slightly better survival trend, this was not significant. Given that CDH1 loss-of-function mutations were more frequent in HER2- tumors, the trend toward improved survival may reflect the differences rather than direct survival benefit from CDH1 mutation status. Thus, HER2– subtypes—particularly luminal and lobular breast cancers are generally less aggressive and associated with better prognosis, the small survival advantage may reflect subtype differences rather than a direct protective effect of CDH1 mutations.
