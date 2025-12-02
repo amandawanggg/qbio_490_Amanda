@@ -1,0 +1,215 @@
+---
+title: "Intro to Epigenomics"
+author: Wade Boohar
+date: 11/03/24
+updated: 03/07/24
+---
+
+
+```{r setup}
+ knitr::opts_knit$set(root.dir = normalizePath("/home1/wangaman/490_cluster/analysis_data"))
+```
+
+Package Download and Data-cleaning
+```{r}
+if (!require("sesameData", quietly = TRUE))
+BiocManager::install("sesameData")
+
+if (!require("sesame", quietly = TRUE))
+BiocManager::install("sesame")
+
+if (!require("limma", quietly = TRUE))
+BiocManager::install("limma")
+```
+
+
+Load in all necessary packages
+```{r}
+library(TCGAbiolinks)
+library(sesame)
+library(sesameData)
+library(limma)
+```
+
+
+```{r}
+methylation_clinical <- read.csv ("/project/rohs_1070/analysis_data/brca_methylation_clinical.csv", row.names=1)
+cpg_sites <- read.csv("/project/rohs_1070/analysis_data/brca_cpg_sites.csv", row.names = 1)
+
+
+install.packages("data.table")
+library(data.table)
+
+betas <- fread('/project/rohs_1070/analysis_data/brca_methylation_betas.csv', showProgress = TRUE)
+
+betas <- as.data.frame(betas)
+rownames(betas) <- betas[[1]]
+betas[[1]] <- NULL
+```
+
+(1) Naive Differential Methylation
+```{r}
+#masking out NAs
+na_mask <- !is.na(methylation_clinical$age_at_diagnosis)
+methylation_clinical <- methylation_clinical[na_mask,]
+betas_clean <- betas[,na_mask]
+
+median <- median(methylation_clinical$age_at_diagnosis)
+
+methylation_clinical$age_category <- ifelse(methylation_clinical$age_at_diagnosis >= median, "old", "young")
+
+#fitting linear models using a "target value"
+young_mask <- methylation_clinical$age_category == "young"
+
+methylation_clinical$ages <- !young_mask
+
+mval <- t(apply(betas_clean, 1, function(x) log2(x/(1-x)))) 
+#mvalue is another statistic for methylation, centered at 0 and ranges from -1 to 1
+
+design <- model.matrix(~ages, data = methylation_clinical)
+fit <- lmFit(mval, design)
+fit2 <- eBayes(fit)
+```
+
+```{r}
+#Extracting model into dataframe
+dat <- data.frame(foldchange = fit[["coefficients"]][,2], logPvalue =  -log10(p.adjust(fit2[["p.value"]][,2],method='BY')), geneName = cpg_sites$gene)
+dat$threshold <- as.factor(abs(dat$foldchange) < 1)
+
+#Visualization
+library(ggplot2)
+cols <- c("TRUE" = "grey", "FALSE" = "blue")
+ggplot(data=dat, aes(x=foldchange, y = logPvalue, color=threshold)) +
+  geom_point(alpha=.2, size=0.6) +
+  scale_colour_manual(values = cols) +
+  geom_vline(xintercept = 1, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = - 1, colour="#990000", linetype="dashed") +
+  geom_hline(yintercept = 2, colour = "#990000", linetype="dashed") +
+  theme(legend.position="none") +
+  xlab("Fold Change") +
+  ylab("-log10 p value") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+The volcano plot shows that genes in the upper right are significantly upregulated in metastatic patients whereas there is no significantly downregulated genes on the left side. And most patients are clustered near the center, meaning most genes show no significant difference between metastatic and non-metastatic samples. From this, we can conclude that certain genes are expressed at much higher levels in metastatic breast cancer, suggesting possible roles in metastasis or disease progression. However, we cannot conclude causal relationships or identify specific pathways based on this plot alone.
+
+
+(2) Direct comparison of methylation status to transcriptional activity
+
+#...INSERT DESeq2 Stuff here to generate 'results'...
+```{r}
+ knitr::opts_knit$set(root.dir = normalizePath("/home1/wangaman/490_cluster/analysis_data"))
+if (!require("DESeq2", quietly = TRUE))
+BiocManager::install("DESeq2")
+rna_clinical <- read.csv("brca_rna_clinical_data.csv")
+rna_genes <- read.csv("brca_rna_gene_data.csv")
+rna_counts <- read.csv("brca_rna_count_data.csv")
+
+row.names(rna_genes) <- rna_genes$gene_id
+
+row.names(rna_counts) <- rna_genes$gene_id
+rna_counts <- rna_counts[, -1]  
+colnames(rna_counts) <- rna_clinical$barcode
+
+META_sample_mask <- ifelse(rna_clinical$sample_type == "Metastatic", F, T)
+clean_clinical <- rna_clinical[META_sample_mask,]
+
+clean_clinical$sample_type <- factor(clean_clinical$sample_type)
+
+
+NA_age_mask <- !is.na(clean_clinical$age_at_index)
+clean_clinical <- clean_clinical[NA_age_mask, ]
+
+clean_clinical$age_category <- ifelse(clean_clinical$age_at_index >= 58, "old", "young")
+
+clean_clinical$age_category <- factor(clean_clinical$age_category)
+
+sum(is.na(clean_clinical$gender))
+clean_clinical$gender <- factor(clean_clinical$gender)
+
+
+clean_counts <- rna_counts[, META_sample_mask]
+clean_counts <- clean_counts[, NA_age_mask]
+
+rna_counts <- rna_counts[, -1]  
+rownames(clean_clinical) <- clean_clinical$barcode
+
+less_1000_mask <- rowSums(rna_counts) >= 20
+clean_counts <- clean_counts [less_1000_mask, ]
+clean_genes <- rna_genes[less_1000_mask, ]
+
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(
+  countData = clean_counts,
+  colData   = clean_clinical,
+  design    = ~ age_category + sample_type
+)
+
+dds_obj <- DESeq(dds)
+resultsNames(dds_obj)
+
+results <- results(dds_obj, format = "DataFrame",
+                   contrast = c("sample_type", "Primary Tumor", "Solid Tissue Normal"))
+results <- data.frame(results)
+
+
+results$gene_name <- clean_genes$gene_name
+results$padj[is.na(results$padj)] <- 1
+results$`-log10(padj)` <- -log10(results$padj)
+```
+```{r}
+library(EnhancedVolcano)
+
+EnhancedVolcano(results,
+                lab = results$gene_name,
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = 'Sample Definition: Tumor vs Normal Tissue',
+                pCutoff = 0.05,      # padj threshold
+                FCcutoff = 1,         # |log2FC| >= 1
+                pointSize = 1.0,
+                labSize = 5.0
+)
+```
+
+
+
+Most genes cluster around zero fold change, indicating that the majority of genes are expressed similarly between tumor and normal tissues. Only a few genes (green points) show larger positive or negative fold changes, meaning they are either upregulated or downregulated in tumors, but their overall statistical significance is modest since few points exceed the horizontal significance cutoff. Only a small subset of genes differ substantially in expression between tumor and normal breast tissue, suggesting that major transcriptomic changes are limited to specific genes involved in tumorigenesis. CCDC39 highlighted in red—show both a high fold change and statistical significance, indicating potential tumor-specific differential expression. Only a limited number of genes are significantly dysregulated between tumor and normal tissue, with CCDC39 being one of the most notable.
+
+Question 3:
+
+
+
+```{r}
+#you can also try looking at "upregulated" or "hypermethylated" !
+downregulated <- results[(results$log2FoldChange < 3), 'gene_name']
+hypomethylated <- dat[dat$foldchange > 1 , 'geneName']
+interest_genes <- intersect(downregulated, hypomethylated)
+```
+
+
+The 3 interest gene are GIPR, MCF2L2, PDE4A. In the UCSC Genome Browser, the GIPR locus shows two annotated CpG islands (No. 17 and No. 20) overlapping the promoter region and first exon of GIPR. The co-localization of CpG islands and a regulatory gene model supports the hypothesis that epigenetic modulation may influence GIPR expression in breast cancer. "Genetically proxied impaired GIPR signalling and risk of 6 cancers by Rogers et al. (2023)". This paper uses human‐genetic Mendelian randomisation to study the effect of a missense variant in GIPR (rs1800437, E354Q) that impairs GIPR signalling, and assesses risk of breast (and other) cancers. They found that each copy of E354Q was associated with higher risk of overall and luminal A-like breast cancer. The conclusion states that "Our human genetics analysis suggests an adverse effect of GIPR E354Q variant on breast cancer risk, supporting further evaluation of GIPR signalling in breast cancer prevention”. However, because their study addresses germline variation and cancer risk rather than tumour methylation or metastatic progression per se, our epigenetic differential-expression findings remain exploratory and require further functional validation.
+
+(Extra) Making Boxplots
+```{r}
+GENE<-"SCTR"
+
+gene_counts_mask <- rna_genes$gene_name == GENE
+gene_betas_mask <- cpg_sites$gene == GENE
+
+rna_clinical_tumor <- rna_clinical$definition == "Primary solid Tumor"
+methylation_clinical_tumor <- methylation_clinical$definition == "Primary solid Tumor"
+
+rna_clinical_normal <- rna_clinical$definition == "Solid Tissue Normal"
+methylation_clinical_normal <- methylation_clinical$definition == "Solid Tissue Normal"
+
+rna_tumor <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_tumor])
+methylation_tumor <- (betas[gene_betas_mask, methylation_clinical_tumor])
+
+rna_normal <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_normal])
+methylation_normal <- (betas[gene_betas_mask, methylation_clinical_normal])
+```
+
+```{r}
+boxplot(rna_normal, rna_tumor, xlab='Group', ylab='Counts', names=c('Normal', 'Tumor'))
+```
